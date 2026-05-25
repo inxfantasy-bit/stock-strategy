@@ -1,4 +1,4 @@
-import sys, io, time, requests
+import sys, io, os, time, requests
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
 import pandas as pd
@@ -257,9 +257,9 @@ def run(target_date=None, quiet=False):
         log(out.to_string(index=False))
 
         if not quiet:
-            fname     = f"D:\\AI agent\\策略1_選股_{today}.xlsx"
-            fname_csv = f"D:\\AI agent\\策略1_選股_{today}.csv"
-            try:
+           base_dir  = os.path.dirname(os.path.abspath(__file__))
+           fname     = os.path.join(base_dir, f"策略1_選股_{today}.xlsx")
+           fname_csv = os.path.join(base_dir, f"策略1_選股_{today}.csv")
                 out.to_excel(fname, index=False)
                 log(f"\n已儲存：{fname}")
             except PermissionError:
