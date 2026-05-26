@@ -1,0 +1,43 @@
+name: 策略1每日選股
+
+on:
+  schedule:
+    - cron: '30 6 * * 1-5'  # 台灣時間 14:30，週一至週五
+  workflow_dispatch:
+
+jobs:
+  run-strategy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安裝套件
+        run: pip install requests pandas openpyxl beautifulsoup4 lxml urllib3
+
+      - name: 執行策略1
+        run: python goodinfo_strategy1.py 2>&1 | tee result.txt
+
+      - name: 取得 CSV 檔名
+        run: echo "CSV_FILE=$(ls 策略1_選股_*.csv 2>/dev/null | head -1)" >> $GITHUB_ENV
+
+      - name: 取得今日日期
+        run: echo "TODAY=$(date '+%Y/%m/%d')" >> $GITHUB_ENV
+
+      - name: 寄送 Email
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.GMAIL_USERNAME }}
+          password: ${{ secrets.GMAIL_PASSWORD }}
+          subject: "策略1 選股結果 ${{ env.TODAY }}"
+          to: inxfantasy@gmail.com
+          from: ${{ secrets.GMAIL_USERNAME }}
+          body: file://result.txt
+          attachments: ${{ env.CSV_FILE }}

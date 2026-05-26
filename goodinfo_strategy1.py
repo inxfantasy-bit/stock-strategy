@@ -1,4 +1,4 @@
-import sys, io, time, requests
+import sys, io, os, time, requests
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
 import pandas as pd
@@ -92,7 +92,7 @@ def fetch_industry():
         cols = row.find_all("td")
         if len(cols) >= 5:
             code_name = cols[0].get_text(strip=True)
-            industry  = cols[4].get_text(strip=True)   # 第5欄才是產業別
+            industry  = cols[4].get_text(strip=True)
             if "　" in code_name:
                 code = code_name.split("　")[0].strip()
                 if len(code) == 4 and code.isdigit():
@@ -110,7 +110,6 @@ def fetch_inst(date_str):
     if not fields or not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows, columns=fields)
-    # 只保留 4 碼數字的股票代號，並去重
     df = df[df["證券代號"].str.match(r"^\d{4}$", na=False)]
     df = df.drop_duplicates(subset="證券代號", keep="first")
     return df
@@ -125,7 +124,6 @@ def run(target_date=None, quiet=False):
     log = (lambda *a, **kw: None) if quiet else print
     today = target_date if target_date else datetime.now().strftime("%Y%m%d")
 
-    # ── 今日資料 ──────────────────────────────────────
     log(f"抓取今日（{today}）交易資料...")
     df_today = fetch_daily(today)
     if df_today.empty:
@@ -134,7 +132,6 @@ def run(target_date=None, quiet=False):
         df_today = fetch_daily(today)
     log(f"  → {len(df_today)} 筆")
 
-    # ── 前一交易日資料（量比用）──────────────────────
     for skip in range(1, 6):
         yest = prev_date(today, skip)
         log(f"抓取前一交易日（{yest}）資料...")
@@ -143,86 +140,71 @@ def run(target_date=None, quiet=False):
             break
     log(f"  → {len(df_prev)} 筆")
 
-    # ── 三大法人 ──────────────────────────────────────
     log("抓取三大法人資料...")
     df_inst = fetch_inst(today)
     log(f"  → {len(df_inst)} 筆")
 
-    # ── 產業分類（條件5）────────────────────────────
     log("抓取產業分類資料...")
     df_ind = fetch_industry()
     log(f"  → {len(df_ind)} 筆")
 
-    # ── 整理今日主表 ──────────────────────────────────
     df = df_today[["證券代號", "證券名稱", "成交股數", "收盤價", "本益比"]].copy()
     df["收盤_n"] = df["收盤價"].apply(clean)
     df["今量_n"] = df["成交股數"].apply(clean)
     df["pe_n"]   = df["本益比"].apply(clean)
 
-    # 前日量
     df_prev_vol = df_prev[["證券代號", "成交股數", "收盤價"]].copy()
     df_prev_vol.columns = ["證券代號", "昨量", "昨收"]
     df_prev_vol["昨量_n"] = df_prev_vol["昨量"].apply(clean)
     df_prev_vol["昨收_n"] = df_prev_vol["昨收"].apply(clean)
     df = df.merge(df_prev_vol[["證券代號", "昨量_n", "昨收_n"]], on="證券代號", how="left")
 
-    # ── 拆分三大法人 ──────────────────────────────────
     def col(name): return df_inst[name].apply(clean)
 
-    # 外資（外陸資 + 外資自營商）
     df_inst["外資_量"] = col("外陸資買進股數(不含外資自營商)") + col("外陸資賣出股數(不含外資自營商)") \
                        + col("外資自營商買進股數") + col("外資自營商賣出股數")
     df_inst["外資_超"] = col("外陸資買賣超股數(不含外資自營商)") + col("外資自營商買賣超股數")
 
-    # 投信
     df_inst["投信_量"] = col("投信買進股數") + col("投信賣出股數")
     df_inst["投信_超"] = col("投信買賣超股數")
 
-    # 自營商（自行買賣 + 避險）
     df_inst["自營_量"] = col("自營商買進股數(自行買賣)") + col("自營商賣出股數(自行買賣)") \
                        + col("自營商買進股數(避險)") + col("自營商賣出股數(避險)")
     df_inst["自營_超"] = col("自營商買賣超股數")
 
-    # 合計量（用於過濾條件）
     df_inst["法人量"] = df_inst["外資_量"] + df_inst["投信_量"] + df_inst["自營_量"]
 
     inst_cols = ["證券代號", "法人量", "外資_量", "外資_超", "投信_量", "投信_超", "自營_量", "自營_超"]
     df = df.merge(df_inst[inst_cols], on="證券代號", how="left")
 
-    # 合併產業分類
     df = df.merge(df_ind, on="證券代號", how="left")
     df["產業"] = df["產業"].fillna("")
 
-    # 衍生指標
     df["量比"]    = df["今量_n"] / df["昨量_n"].replace(0, float("nan"))
     df["漲跌幅"]  = (df["收盤_n"] - df["昨收_n"]) / df["昨收_n"] * 100
     df["法人%"]   = df["法人量"] / df["今量_n"] * 100
     df["外資%"]   = df["外資_量"] / df["今量_n"] * 100
     df["投信%"]   = df["投信_量"] / df["今量_n"] * 100
     df["自營%"]   = df["自營_量"] / df["今量_n"] * 100
-    # 買超張數（股 / 1000）
     df["外資超(張)"] = (df["外資_超"] / 1000).round(0)
     df["投信超(張)"] = (df["投信_超"] / 1000).round(0)
     df["自營超(張)"] = (df["自營_超"] / 1000).round(0)
 
-    # 條件5：排除指定產業
     exclude_mask = df["產業"].apply(
         lambda ind: any(kw in ind for kw in EXCLUDE_INDUSTRIES)
     )
 
-    # ── 套用策略條件 ──────────────────────────────────
     mask = (
-        (df["量比"]   >= VOL_RATIO_MIN)    &   # 條件1
-        (df["收盤_n"] <= PRICE_MAX)         &   # 條件2
-        (df["pe_n"]   >  0)                &   # 條件3：本益比>0 → EPS>0
-        (df["法人%"]  >= INST_RATIO_MIN)    &   # 條件4
-        (~exclude_mask)                     &   # 條件5：排除產業
-        (df["pe_n"]   <= PE_MAX)            &   # 條件6：本益比 <= 30
-        (df["漲跌幅"]  >  DAILY_DROP_MIN)       # 條件7：漲跌幅 > -7%
+        (df["量比"]   >= VOL_RATIO_MIN)    &
+        (df["收盤_n"] <= PRICE_MAX)         &
+        (df["pe_n"]   >  0)                &
+        (df["法人%"]  >= INST_RATIO_MIN)    &
+        (~exclude_mask)                     &
+        (df["pe_n"]   <= PE_MAX)            &
+        (df["漲跌幅"]  >  DAILY_DROP_MIN)
     )
     result = df[mask].copy().sort_values("量比", ascending=False)
 
-    # ── 條件8：收盤 >= MA20 ───────────────────────────
     if not result.empty:
         log("計算 20日移動均線（MA20）...")
         codes = set(result["證券代號"].tolist())
@@ -233,7 +215,6 @@ def run(target_date=None, quiet=False):
         result = result.sort_values("量比", ascending=False)
         log(f"  MA20 篩選：{before} → {len(result)} 檔（剔除 {before - len(result)} 檔）")
 
-    # ── 輸出 ──────────────────────────────────────────
     log(f"\n{'='*55}")
     log(f"策略1 選股結果（{today}）：共 {len(result)} 檔")
     log(f"EPS 判斷：本益比 > 0（TWSE 每季更新）")
@@ -257,8 +238,9 @@ def run(target_date=None, quiet=False):
         log(out.to_string(index=False))
 
         if not quiet:
-            fname     = f"D:\\AI agent\\策略1_選股_{today}.xlsx"
-            fname_csv = f"D:\\AI agent\\策略1_選股_{today}.csv"
+            base_dir  = os.path.dirname(os.path.abspath(__file__))
+            fname     = os.path.join(base_dir, f"策略1_選股_{today}.xlsx")
+            fname_csv = os.path.join(base_dir, f"策略1_選股_{today}.csv")
             try:
                 out.to_excel(fname, index=False)
                 log(f"\n已儲存：{fname}")
