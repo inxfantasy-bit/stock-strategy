@@ -2,7 +2,7 @@ name: 策略1每日選股
 
 on:
   schedule:
-    - cron: '10 15 * * *'  # 測試用：UTC 15:10（改完後請還原）
+    - cron: '25 15 * * *'  # 測試用：UTC 15:25（改完後請還原）
   workflow_dispatch:
 
 jobs:
