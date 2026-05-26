@@ -2,7 +2,7 @@ name: 策略1每日選股
 
 on:
   schedule:
-    - cron: '30 6 * * 1-5'  # 台灣時間 14:30，週一至週五
+    - cron: '30 7 * * 1-5'  # 台灣時間 15:30，週一至週五
   workflow_dispatch:
 
 jobs:
