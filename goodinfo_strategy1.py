@@ -15,7 +15,7 @@ INST_RATIO_MIN = 30.0       # 條件4：法人成交佔比 >= 30%
 PE_MAX         = 30.0       # 條件6：本益比 <= 30
 DAILY_DROP_MIN = -7.0       # 條件7：漲跌幅 > -7%
 # 條件5：排除產業關鍵字
-EXCLUDE_INDUSTRIES = ["建材營造", "不動產", "建設", "土地", "租賃", "建築", "金融保險"]
+EXCLUDE_INDUSTRIES = ["建材營造", "不動產", "建設", "土地", "租賃", "建築", "金融保險", "運動休閒"]
 # ──────────────────────────────────────────────────────
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
@@ -63,8 +63,69 @@ def fetch_ma20(today, codes, log=print):
             ma20_map[code] = round(sum(prices[-20:]) / 20, 2)
     return ma20_map
 
-def fetch_daily(date_str):
-    """回傳當日全股票：代號、名稱、成交股數、收盤價、本益比"""
+def get_latest_quarter():
+    """回傳（今年季度, 去年同季度）的 (西元年, 季, ROC年) tuple"""
+    now = datetime.now()
+    y, m = now.year, now.month
+    if m >= 11:
+        q = 3
+    elif m >= 8:
+        q = 2
+    elif m >= 5:
+        q = 1
+    else:
+        y -= 1
+        q = 4
+    return y, q, y - 1911, y - 1, y - 1912
+
+def fetch_eps(code, roc_year, season):
+    """從 MOPS 取得單一公司特定季度的基本每股盈餘"""
+    from bs4 import BeautifulSoup
+    try:
+        r = requests.post(
+            "https://mops.twse.com.tw/mops/web/ajax_t163sb04",
+            data={"step": "1", "firstin": "1", "off": "1",
+                  "co_id": code, "year": str(roc_year), "season": f"{season:02d}"},
+            headers={**HEADERS, "Content-Type": "application/x-www-form-urlencoded"},
+            timeout=15, verify=False
+        )
+        r.encoding = "utf-8"
+        soup = BeautifulSoup(r.text, "lxml")
+        for row in soup.find_all("tr"):
+            tds = row.find_all("td")
+            if not tds:
+                continue
+            label = tds[0].get_text(strip=True)
+            if "基本每股盈餘" in label:
+                for td in tds[1:]:
+                    txt = td.get_text(strip=True).replace(",", "")
+                    if txt and txt not in ("--", "-", ""):
+                        try:
+                            return float(txt)
+                        except ValueError:
+                            pass
+    except Exception:
+        pass
+    return None
+
+def fetch_vol_max_4days(today):
+    """取得今日前3個交易日各股最大成交量，用於判斷4日新高"""
+    trade_dates = get_prev_trading_days(today, 3)
+    max_vol = {}
+    for date in trade_dates:
+        df = fetch_daily_raw(date)
+        if df.empty:
+            time.sleep(1)
+            continue
+        for _, row in df.iterrows():
+            code = row["證券代號"]
+            vol = clean(row["成交股數"])
+            if vol and vol > max_vol.get(code, 0):
+                max_vol[code] = vol
+        time.sleep(1)
+    return max_vol
+
+def fetch_daily_raw(date_str):
     data = twse_get(
         "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX",
         {"response": "json", "date": date_str, "type": "ALLBUT0999"}
@@ -74,6 +135,9 @@ def fetch_daily(date_str):
         if "證券代號" in fields and "成交股數" in fields:
             return pd.DataFrame(block["data"], columns=fields)
     return pd.DataFrame()
+
+def fetch_daily(date_str):
+    return fetch_daily_raw(date_str)
 
 def fetch_industry():
     """從 TWSE ISIN 系統取得上市股票的產業分類"""
@@ -143,10 +207,17 @@ def run(target_date=None, quiet=False):
     log("抓取三大法人資料...")
     df_inst = fetch_inst(today)
     log(f"  → {len(df_inst)} 筆")
+    if df_inst.empty:
+        log("  ⚠ 法人資料尚未公布，結束執行。")
+        return pd.DataFrame(), today
 
     log("抓取產業分類資料...")
     df_ind = fetch_industry()
     log(f"  → {len(df_ind)} 筆")
+
+    log("抓取前3個交易日成交量（判斷4日新高）...")
+    vol_max_4days = fetch_vol_max_4days(today)
+    log(f"  → 完成")
 
     df = df_today[["證券代號", "證券名稱", "成交股數", "收盤價", "本益比"]].copy()
     df["收盤_n"] = df["收盤價"].apply(clean)
@@ -180,6 +251,7 @@ def run(target_date=None, quiet=False):
     df = df.merge(df_ind, on="證券代號", how="left")
     df["產業"] = df["產業"].fillna("")
 
+    df["5日前高量"] = df["證券代號"].map(vol_max_4days)
     df["量比"]    = df["今量_n"] / df["昨量_n"].replace(0, float("nan"))
     df["漲跌幅"]  = (df["收盤_n"] - df["昨收_n"]) / df["昨收_n"] * 100
     df["法人%"]   = df["法人量"] / df["今量_n"] * 100
@@ -201,9 +273,25 @@ def run(target_date=None, quiet=False):
         (df["法人%"]  >= INST_RATIO_MIN)    &
         (~exclude_mask)                     &
         (df["pe_n"]   <= PE_MAX)            &
-        (df["漲跌幅"]  >  DAILY_DROP_MIN)
+        (df["漲跌幅"]  >  DAILY_DROP_MIN)   &
+        (df["今量_n"] >= df["5日前高量"])
     )
     result = df[mask].copy().sort_values("量比", ascending=False)
+
+    if not result.empty:
+        cur_yr, cur_q, roc_cur, prev_yr, roc_prev = get_latest_quarter()
+        log(f"查詢 EPS YoY（{cur_yr}Q{cur_q} vs {prev_yr}Q{cur_q}）...")
+        def eps_yoy_pass(code):
+            eps_cur  = fetch_eps(code, roc_cur,  cur_q)
+            time.sleep(0.3)
+            eps_prev = fetch_eps(code, roc_prev, cur_q)
+            time.sleep(0.3)
+            if eps_cur is None or eps_prev is None:
+                return True  # 無法取得資料時保留
+            return eps_cur >= eps_prev
+        before = len(result)
+        result = result[result["證券代號"].apply(eps_yoy_pass)].copy()
+        log(f"  EPS YoY 篩選：{before} → {len(result)} 檔（剔除 {before - len(result)} 檔）")
 
     if not result.empty:
         log("計算 20日移動均線（MA20）...")
@@ -217,7 +305,8 @@ def run(target_date=None, quiet=False):
 
     log(f"\n{'='*55}")
     log(f"策略1 選股結果（{today}）：共 {len(result)} 檔")
-    log(f"EPS 判斷：本益比 > 0（TWSE 每季更新）")
+    log(f"EPS 判斷：本益比 > 0，且最近一季 EPS ≥ 去年同期")
+    log(f"成交量條件：4日內新高")
     log(f"{'='*55}")
 
     if not result.empty:
@@ -238,7 +327,7 @@ def run(target_date=None, quiet=False):
         log(out.to_string(index=False))
 
         if not quiet:
-            base_dir  = os.path.dirname(os.path.abspath(__file__))
+            base_dir  = r"D:\AI agent"
             fname     = os.path.join(base_dir, f"策略1_選股_{today}.xlsx")
             fname_csv = os.path.join(base_dir, f"策略1_選股_{today}.csv")
             try:
@@ -249,7 +338,7 @@ def run(target_date=None, quiet=False):
             out.to_csv(fname_csv, index=False, encoding="utf-8-sig")
             log(f"已儲存：{fname_csv}")
     else:
-        log("今日無符合所有條件的股票。")
+        log("無")
 
     return result, today
 
