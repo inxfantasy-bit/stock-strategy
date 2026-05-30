@@ -338,7 +338,7 @@ def run(target_date=None, quiet=False):
             out.to_csv(fname_csv, index=False, encoding="utf-8-sig")
             log(f"已儲存：{fname_csv}")
     else:
-        log("無")
+        log("無符合條件的股票")
 
     return result, today
 
