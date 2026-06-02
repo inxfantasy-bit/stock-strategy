@@ -327,7 +327,9 @@ def run(target_date=None, quiet=False):
         log(out.to_string(index=False))
 
         if not quiet:
-            base_dir  = r"D:\AI agent"
+              import platform
+              base_dir  = r"D:\AI agent" if platform.system() == 'Windows' else os.getcwd()
+              os.makedirs(base_dir, exist_ok=True)
             fname     = os.path.join(base_dir, f"策略1_選股_{today}.xlsx")
             fname_csv = os.path.join(base_dir, f"策略1_選股_{today}.csv")
             try:
