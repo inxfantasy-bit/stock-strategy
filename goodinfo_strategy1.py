@@ -326,12 +326,12 @@ def run(target_date=None, quiet=False):
             out[c] = out[c].map(lambda x: f"{x:+.0f}" if pd.notna(x) else "-")
         log(out.to_string(index=False))
 
-        if not quiet:
+          if not quiet:
               import platform
               base_dir  = r"D:\AI agent" if platform.system() == 'Windows' else os.getcwd()
               os.makedirs(base_dir, exist_ok=True)
-            fname     = os.path.join(base_dir, f"策略1_選股_{today}.xlsx")
-            fname_csv = os.path.join(base_dir, f"策略1_選股_{today}.csv")
+              fname     = os.path.join(base_dir, f"策略1_選股_{today}.xlsx")
+              fname_csv = os.path.join(base_dir, f"策略1_選股_{today}.csv")
             try:
                 out.to_excel(fname, index=False)
                 log(f"\n已儲存：{fname}")
